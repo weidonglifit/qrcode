@@ -12,9 +12,7 @@
       padding: 20px;
       background-color: #f4f4f9;
     }
-    h1 {
-      color: #333;
-    }
+    h1 { color: #333; }
     #reader {
       width: 100%;
       max-width: 500px;
@@ -25,7 +23,7 @@
       overflow: hidden;
     }
     .message {
-      margin-top: 20px;
+      margin-top: 15px;
       font-size: 1.2em;
       font-weight: bold;
       min-height: 30px;
@@ -33,26 +31,52 @@
     .success { color: green; }
     .error { color: red; }
     .loading { color: #555; }
+    
+    /* 新增下拉選單樣式 */
+    .course-selector {
+      margin-bottom: 20px;
+      padding: 15px;
+      background: #fff;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+    select {
+      padding: 8px;
+      font-size: 1em;
+      border-radius: 4px;
+      width: 80%;
+      max-width: 300px;
+    }
+    .info-text {
+      margin-top: 10px;
+      font-size: 0.9em;
+      color: #0056b3;
+    }
   </style>
 </head>
 <body>
 
   <h1>QR Code 掃描打卡</h1>
-  <div id="reader"></div>
   
+  <div class="course-selector">
+    <label for="courseSelect">選擇課程：</label>
+    <select id="courseSelect" disabled>
+      <option value="">載入課程中...</option>
+    </select>
+    <div id="dataStatus" class="info-text">請先選擇課程以下載報名名單</div>
+  </div>
+
+  <div id="reader"></div>
   <div id="statusMessage" class="message">請將 QR Code 對準鏡頭</div>
 
   <script>
     // 你的 GAS API URL
     const GAS_API_URL = "https://script.google.com/macros/s/AKfycbxDBlXRiLMABJvYKgkDDM4sDfosgcvh18tQyIzbKM915CD1KjkImgYOA5Lvs5rPvT65/exec";
 
-    // 呼叫 GAS 的函式 (由你提供)
     function callGasApi(action, params = []) {
       return fetch(GAS_API_URL, {
         method: "POST",
-        headers: {
-          "Content-Type": "text/plain;charset=utf-8",
-        },
+        headers: { "Content-Type": "text/plain;charset=utf-8" },
         body: JSON.stringify({ action: action, params: params })
       })
       .then(response => response.json())
@@ -60,57 +84,133 @@
         if (res.status === "error") {
           throw new Error(res.message);
         }
-        return res.data; // 這裡會拿到 GAS 回傳的 "打卡成功！號碼：..."
+        return res.data; 
       });
     }
 
-    // 狀態控制，避免連續掃描觸發多次 API
+    // 全域變數儲存報名資料與掃描狀態
+    let currentRegisteredUsers = []; 
     let isProcessing = false;
+    
+    const courseSelect = document.getElementById('courseSelect');
+    const dataStatus = document.getElementById('dataStatus');
     const statusDiv = document.getElementById('statusMessage');
+
+    // 網頁載入時：向 GAS 抓取課程選單
+    window.onload = function() {
+      callGasApi("getCourses")
+        .then(courses => {
+          courseSelect.innerHTML = '<option value="">請選擇課程</option>';
+          courses.forEach(c => {
+            let opt = document.createElement("option");
+            opt.value = c;
+            opt.text = c;
+            courseSelect.appendChild(opt);
+          });
+          courseSelect.disabled = false;
+        })
+        .catch(err => {
+          dataStatus.style.color = "red";
+          dataStatus.innerText = "課程載入失敗: " + err.message;
+        });
+    };
+
+    // 當選擇課程變更時：向 GAS 抓取報名名單暫存到前端
+    courseSelect.addEventListener("change", function(e) {
+      const selectedCourse = e.target.value;
+      
+      // 如果選擇空白，清空資料
+      if (!selectedCourse) {
+        currentRegisteredUsers = [];
+        dataStatus.innerText = "請先選擇課程以下載報名名單";
+        return;
+      }
+
+      // 載入資料
+      dataStatus.style.color = "#555";
+      dataStatus.innerText = "讀取報名資料中，請稍候...";
+      courseSelect.disabled = true; // 讀取時暫時鎖定選單
+
+      callGasApi("getRegisteredUsers", [selectedCourse])
+        .then(users => {
+          currentRegisteredUsers = users;
+          dataStatus.style.color = "#0056b3";
+          dataStatus.innerText = `✅ 已為「${selectedCourse}」載入 ${users.length} 筆報名資料`;
+        })
+        .catch(err => {
+          dataStatus.style.color = "red";
+          dataStatus.innerText = "報名資料載入失敗: " + err.message;
+        })
+        .finally(() => {
+          courseSelect.disabled = false;
+        });
+    });
 
     // 當成功掃描到 QR Code 時觸發
     function onScanSuccess(decodedText, decodedResult) {
-      // 如果正在處理上一個請求，則忽略這次掃描
       if (isProcessing) return;
       isProcessing = true;
 
-      // 更新畫面狀態
-      statusDiv.className = "message loading";
-      statusDiv.innerText = `讀取到：${decodedText}，正在打卡中...`;
+      const selectedCourse = courseSelect.value;
+      
+      // 1. 檢查是否已選課程
+      if (!selectedCourse) {
+        statusDiv.className = "message error";
+        statusDiv.innerText = "❌ 掃描失敗：請先從上方選擇課程";
+        resetScanState();
+        return;
+      }
 
-      // 呼叫 API 進行打卡
-      callGasApi('attendanceTake', [decodedText])
+      // 2. 檢查掃描到的電話是否有在名單中
+      const scannedPhone = decodedText.trim();
+      const matchedUser = currentRegisteredUsers.find(user => user.phone === scannedPhone);
+
+      if (!matchedUser) {
+        // 沒有 MATCH
+        statusDiv.className = "message error";
+        statusDiv.innerText = `❌ 沒有報名資料 (號碼: ${scannedPhone})`;
+        resetScanState();
+        return;
+      }
+
+      // 3. 有 MATCH，進行打卡
+      statusDiv.className = "message loading";
+      statusDiv.innerText = `找到報名資料：${matchedUser.name}，正在打卡中...`;
+
+      // 呼叫 API：傳入 姓名, 電話, 選擇的課程
+      callGasApi('attendanceTake', [matchedUser.name, matchedUser.phone, selectedCourse])
         .then(resultData => {
           statusDiv.className = "message success";
           statusDiv.innerText = `✅ ${resultData}`;
         })
         .catch(error => {
           statusDiv.className = "message error";
-          statusDiv.innerText = `❌ 打卡失敗: ${error.message}`;
+          statusDiv.innerText = `❌ 打卡寫入失敗: ${error.message}`;
         })
         .finally(() => {
-          // 設定 3 秒後恢復可掃描狀態
-          setTimeout(() => {
-            isProcessing = false;
-            statusDiv.className = "message";
-            statusDiv.innerText = "請將 QR Code 對準鏡頭以進行下一位打卡";
-          }, 3000);
+          resetScanState();
         });
     }
 
-    // 當掃描失敗或未找到 QR code 時觸發 (通常略過不處理)
     function onScanFailure(error) {
-      // 不需印出錯誤，因為每一幀沒掃到都會觸發此函式
+      // 不處理未掃描到的狀態
+    }
+
+    // 封裝重置掃描狀態的函式 (延遲 3 秒後可再次掃描)
+    function resetScanState() {
+      setTimeout(() => {
+        isProcessing = false;
+        statusDiv.className = "message";
+        statusDiv.innerText = "請將 QR Code 對準鏡頭以進行下一位打卡";
+      }, 3000);
     }
 
     // 初始化 HTML5 QR Code 掃描器
     let html5QrcodeScanner = new Html5QrcodeScanner(
       "reader",
       { fps: 10, qrbox: {width: 250, height: 250} },
-      /* verbose= */ false
+      false
     );
-    
-    // 渲染掃描器
     html5QrcodeScanner.render(onScanSuccess, onScanFailure);
 
   </script>
