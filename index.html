@@ -27,6 +27,7 @@
       font-size: 1.2em;
       font-weight: bold;
       min-height: 30px;
+      line-height: 1.5;
     }
     .success { color: green; }
     .error { color: red; }
@@ -52,6 +53,66 @@
       font-size: 0.9em;
       color: #0056b3;
     }
+
+    /* === 新增：多人選擇 Modal 樣式 === */
+    .modal-overlay {
+      display: none; 
+      position: fixed;
+      top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(0,0,0,0.6);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-content {
+      background: #fff;
+      padding: 20px 30px;
+      border-radius: 8px;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+      width: 80%;
+      max-width: 350px;
+      text-align: left;
+    }
+    .modal-content h3 {
+      margin-top: 0;
+      color: #333;
+      text-align: center;
+      margin-bottom: 15px;
+    }
+    .checkbox-group {
+      max-height: 200px;
+      overflow-y: auto;
+      margin-bottom: 20px;
+    }
+    .checkbox-group label {
+      display: block;
+      padding: 8px 0;
+      font-size: 1.1em;
+      cursor: pointer;
+      border-bottom: 1px solid #eee;
+    }
+    .checkbox-group label:last-child {
+      border-bottom: none;
+    }
+    .checkbox-group input {
+      margin-right: 10px;
+      transform: scale(1.2);
+    }
+    .modal-actions {
+      display: flex;
+      justify-content: space-between;
+    }
+    .modal-actions button {
+      flex: 1;
+      padding: 10px;
+      font-size: 1em;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      margin: 0 5px;
+    }
+    .btn-confirm { background: #28a745; color: white; }
+    .btn-cancel { background: #dc3545; color: white; }
   </style>
 </head>
 <body>
@@ -69,8 +130,19 @@
   <div id="reader"></div>
   <div id="statusMessage" class="message">請將 QR Code 對準鏡頭</div>
 
+  <div id="multiUserModal" class="modal-overlay">
+    <div class="modal-content">
+      <h3>同號碼有多筆報名<br><span style="font-size: 0.8em; color: #666;">請勾選要打卡的人員</span></h3>
+      <div id="checkboxContainer" class="checkbox-group">
+        </div>
+      <div class="modal-actions">
+        <button class="btn-cancel" onclick="cancelMultiCheckIn()">取消</button>
+        <button class="btn-confirm" onclick="confirmMultiCheckIn()">確認打卡</button>
+      </div>
+    </div>
+  </div>
+
   <script>
-    // 你的 GAS API URL
     const GAS_API_URL = "https://script.google.com/macros/s/AKfycbxDBlXRiLMABJvYKgkDDM4sDfosgcvh18tQyIzbKM915CD1KjkImgYOA5Lvs5rPvT65/exec";
 
     function callGasApi(action, params = []) {
@@ -88,15 +160,16 @@
       });
     }
 
-    // 全域變數儲存報名資料與掃描狀態
     let currentRegisteredUsers = []; 
     let isProcessing = false;
-    
+    let pendingMultiUsers = []; // 暫存等待確認打卡的多名人員
+
     const courseSelect = document.getElementById('courseSelect');
     const dataStatus = document.getElementById('dataStatus');
     const statusDiv = document.getElementById('statusMessage');
+    const multiUserModal = document.getElementById('multiUserModal');
+    const checkboxContainer = document.getElementById('checkboxContainer');
 
-    // 網頁載入時：向 GAS 抓取課程選單
     window.onload = function() {
       callGasApi("getCourses")
         .then(courses => {
@@ -115,21 +188,16 @@
         });
     };
 
-    // 當選擇課程變更時：向 GAS 抓取報名名單暫存到前端
     courseSelect.addEventListener("change", function(e) {
       const selectedCourse = e.target.value;
-      
-      // 如果選擇空白，清空資料
       if (!selectedCourse) {
         currentRegisteredUsers = [];
         dataStatus.innerText = "請先選擇課程以下載報名名單";
         return;
       }
-
-      // 載入資料
       dataStatus.style.color = "#555";
       dataStatus.innerText = "讀取報名資料中，請稍候...";
-      courseSelect.disabled = true; // 讀取時暫時鎖定選單
+      courseSelect.disabled = true; 
 
       callGasApi("getRegisteredUsers", [selectedCourse])
         .then(users => {
@@ -146,14 +214,13 @@
         });
     });
 
-    // 當成功掃描到 QR Code 時觸發
+    // === 主要修改：掃描成功邏輯 ===
     function onScanSuccess(decodedText, decodedResult) {
       if (isProcessing) return;
       isProcessing = true;
 
       const selectedCourse = courseSelect.value;
       
-      // 1. 檢查是否已選課程
       if (!selectedCourse) {
         statusDiv.className = "message error";
         statusDiv.innerText = "❌ 掃描失敗：請先從上方選擇課程";
@@ -161,43 +228,116 @@
         return;
       }
 
-      // 2. 檢查掃描到的電話是否有在名單中
       const scannedPhone = decodedText.trim();
-      const matchedUser = currentRegisteredUsers.find(user => user.phone === scannedPhone);
+      
+      // 1. 改用 filter 抓出所有符合該電話號碼的資料
+      const matchedUsers = currentRegisteredUsers.filter(user => user.phone === scannedPhone);
 
-      if (!matchedUser) {
-        // 沒有 MATCH
+      if (matchedUsers.length === 0) {
         statusDiv.className = "message error";
         statusDiv.innerText = `❌ 沒有報名資料 (號碼: ${scannedPhone})`;
         resetScanState();
         return;
       }
 
-      // 3. 有 MATCH，進行打卡
-      statusDiv.className = "message loading";
-      statusDiv.innerText = `找到報名資料：${matchedUser.name}，正在打卡中...`;
+      // 2. 判斷人數
+      if (matchedUsers.length === 1) {
+        // 單人：直接打卡
+        processCheckIn(matchedUsers, selectedCourse);
+      } else {
+        // 多人：顯示 Modal 讓使用者選擇
+        showMultiUserModal(matchedUsers);
+      }
+    }
 
-      // 呼叫 API：傳入 姓名, 電話, 選擇的課程
-      callGasApi('attendanceTake', [matchedUser.name, matchedUser.phone, selectedCourse])
-        .then(resultData => {
-          statusDiv.className = "message success";
-          statusDiv.innerText = `✅ ${resultData}`;
-        })
-        .catch(error => {
-          statusDiv.className = "message error";
-          statusDiv.innerText = `❌ 打卡寫入失敗: ${error.message}`;
-        })
-        .finally(() => {
-          resetScanState();
+    // 顯示多人選擇視窗
+    function showMultiUserModal(users) {
+      checkboxContainer.innerHTML = '';
+      pendingMultiUsers = users; 
+
+      users.forEach((user, index) => {
+        const label = document.createElement('label');
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.value = index;
+        checkbox.checked = true; // 預設全勾選
+        
+        label.appendChild(checkbox);
+        label.appendChild(document.createTextNode(` ${user.name}`));
+        checkboxContainer.appendChild(label);
+      });
+
+      multiUserModal.style.display = 'flex';
+    }
+
+    // Modal 取消按鈕
+    function cancelMultiCheckIn() {
+      multiUserModal.style.display = 'none';
+      statusDiv.className = "message error";
+      statusDiv.innerText = "❌ 已取消打卡";
+      resetScanState();
+    }
+
+    // Modal 確認按鈕
+    function confirmMultiCheckIn() {
+      multiUserModal.style.display = 'none';
+      
+      // 找出有被打勾的索引，對應回 pendingMultiUsers
+      const checkedInputs = checkboxContainer.querySelectorAll('input[type="checkbox"]:checked');
+      if (checkedInputs.length === 0) {
+        statusDiv.className = "message error";
+        statusDiv.innerText = "❌ 未選擇任何人員，取消打卡";
+        resetScanState();
+        return;
+      }
+
+      const selectedUsers = Array.from(checkedInputs).map(input => pendingMultiUsers[input.value]);
+      const selectedCourse = courseSelect.value;
+      
+      processCheckIn(selectedUsers, selectedCourse);
+    }
+
+    // === 新增：封裝打卡執行邏輯，支援同時多人 ===
+    function processCheckIn(usersToProcess, courseName) {
+      statusDiv.className = "message loading";
+      const namesText = usersToProcess.map(u => u.name).join(', ');
+      statusDiv.innerText = `正在為 ${namesText} 寫入打卡紀錄...`;
+
+      // 將每個人的打卡請求包裝成 Promise，並攔截各自的成功與失敗訊息
+      const apiPromises = usersToProcess.map(user => {
+        return callGasApi('attendanceTake', [user.name, user.phone, courseName])
+          .then(resultData => ({ name: user.name, status: "success", msg: resultData }))
+          .catch(error => ({ name: user.name, status: "error", msg: error.message }));
+      });
+
+      // 等待所有人的 API 都執行完畢
+      Promise.all(apiPromises).then(results => {
+        let htmlMsg = [];
+        let hasError = false;
+
+        results.forEach(res => {
+          if (res.status === "success") {
+            htmlMsg.push(`✅ ${res.name}: ${res.msg}`);
+          } else {
+            hasError = true;
+            htmlMsg.push(`❌ ${res.name}: 打卡失敗 (${res.msg})`);
+          }
         });
+
+        // 依據是否有人失敗來變更顏色，並使用 innerHTML 來支援換行
+        statusDiv.className = "message " + (hasError ? "error" : "success");
+        statusDiv.innerHTML = htmlMsg.join('<br>');
+      }).finally(() => {
+        resetScanState();
+      });
     }
 
     function onScanFailure(error) {
       // 不處理未掃描到的狀態
     }
 
-    // 封裝重置掃描狀態的函式 (延遲 3 秒後可再次掃描)
     function resetScanState() {
+      // 等待 3 秒後才能進行下一次掃描
       setTimeout(() => {
         isProcessing = false;
         statusDiv.className = "message";
@@ -205,7 +345,6 @@
       }, 3000);
     }
 
-    // 初始化 HTML5 QR Code 掃描器
     let html5QrcodeScanner = new Html5QrcodeScanner(
       "reader",
       { fps: 10, qrbox: {width: 250, height: 250} },
